@@ -1,0 +1,15 @@
+{
+  "name": "learning-loop",
+  "version": "1.0.0",
+  "scripts": {
+    "test": "jest"
+  },
+  "devDependencies": {
+    "jest": "^29"
+  },
+  "jest": {
+    "moduleNameMapper": {
+      "^obsidian$": "<rootDir>/__mocks__/obsidian.js"
+    }
+  }
+}
