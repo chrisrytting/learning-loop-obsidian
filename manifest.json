@@ -1,0 +1,9 @@
+{
+  "id": "learning-loop",
+  "name": "Learning Loop",
+  "description": "Captures insights by matching text against tagged problem pages, inserting Learning Loop Trace blocks, and propagating review tags back to linked pages.",
+  "version": "1.0.0",
+  "author": "Chris Rytting",
+  "isDesktopOnly": false,
+  "minAppVersion": "0.15.0"
+}
