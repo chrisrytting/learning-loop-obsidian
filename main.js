@@ -36,12 +36,22 @@ class LearningLoopPlugin extends Plugin {
         // Check if already inside a Learning Loop Trace block
         let insideBlock = false;
         let blockStart = -1;
+        const totalLines = editor.lineCount();
+        let blockEnd = -1;
         for (let i = cursor.line - 1; i >= 0; i--) {
           const line = editor.getLine(i);
           if (line.length > 0 && !line.match(/^\s/)) {
             if (line.trim() === '- [[Learning Loop Trace]]') {
-              insideBlock = true;
               blockStart = i;
+              blockEnd = blockStart;
+              for (let j = blockStart + 1; j < totalLines; j++) {
+                const bline = editor.getLine(j);
+                if (bline.length > 0 && !bline.match(/^\s/)) break;
+                if (bline.trim()) blockEnd = j;
+              }
+              if (cursor.line <= blockEnd) {
+                insideBlock = true;
+              }
             }
             break;
           }
@@ -49,14 +59,6 @@ class LearningLoopPlugin extends Plugin {
 
         // If inside an LL block, run the Review step machine
         if (insideBlock) {
-          const totalLines = editor.lineCount();
-          // Find the end of the LL block
-          let blockEnd = blockStart;
-          for (let i = blockStart + 1; i < totalLines; i++) {
-            const line = editor.getLine(i);
-            if (line.length > 0 && !line.match(/^\s/)) break;
-            if (line.trim()) blockEnd = i;
-          }
 
           // Find the Review line
           let reviewLineIdx = -1;
