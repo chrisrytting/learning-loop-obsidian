@@ -36,7 +36,7 @@ function createEditor(lines, cursorLine = 0, cursorCh = 0) {
  * Instantiates the plugin and returns the async editorCallback for the Step command.
  * Accepts an optional `files` array for vault/metadata mocking.
  */
-function createPlugin(files = []) {
+async function createPlugin(files = []) {
   const LearningLoopPlugin = require('../main.js');
 
   let capturedCallback = null;
@@ -44,7 +44,7 @@ function createPlugin(files = []) {
   const app = {
     commands: { executeCommandById: () => {} },
     vault: {
-      getFiles: () => files.map((f) => ({ extension: 'md', basename: f.basename })),
+      getFiles: () => files.map((f) => ({ extension: 'md', basename: f.basename, path: f.path || f.basename + '.md' })),
     },
     metadataCache: {
       getFileCache: (file) => {
@@ -64,11 +64,14 @@ function createPlugin(files = []) {
   plugin.app = app;
   plugin.enterInsertMode = () => {};
   plugin.addRibbonIcon = () => {};
+  plugin.addSettingTab = () => {};
+  plugin.loadData = async () => ({});
+  plugin.saveData = async () => {};
   plugin.addCommand = ({ editorCallback }) => {
     capturedCallback = editorCallback;
   };
 
-  plugin.onload();
+  await plugin.onload();
 
   return { step: (editor) => capturedCallback(editor) };
 }

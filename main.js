@@ -1,4 +1,6 @@
-const { Plugin, parseFrontMatterTags } = require('obsidian');
+const { Plugin, PluginSettingTab, Setting, parseFrontMatterTags, requestUrl } = require('obsidian');
+
+const DEFAULT_SETTINGS = { anthropicApiKey: '' };
 
 class LearningLoopPlugin extends Plugin {
   enterInsertMode(editor) {
@@ -17,7 +19,84 @@ class LearningLoopPlugin extends Plugin {
     cm.contentDOM?.dispatchEvent(new KeyboardEvent('keydown', { key: 'i', code: 'KeyI', bubbles: true }));
   }
 
+  async loadSettings() {
+    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+  }
+
+  async saveSettings() {
+    await this.saveData(this.settings);
+  }
+
+  // Returns { keywordMatches: string[], aiMatches: string[], aiWarning: string|null }
+  // keywordMatches and aiMatches are basenames (no brackets), deduplicated between sets.
+  async runSearch(cueText, allFiles) {
+    const problemFiles = allFiles.filter(f => f.extension === 'md' && f.path.startsWith('Problems/'));
+    const problemNames = problemFiles.map(f => f.basename);
+
+    // Keyword search (all .md files with frontmatter tags, as before)
+    const cueLower = cueText.toLowerCase();
+    const keywordMatches = [];
+    for (const file of allFiles.filter(f => f.extension === 'md')) {
+      const cache = this.app.metadataCache.getFileCache(file);
+      if (!cache || !cache.frontmatter) continue;
+      const tags = parseFrontMatterTags(cache.frontmatter);
+      if (!tags) continue;
+      const matched = tags.some(tag => {
+        const keyword = tag.replace(/^#/, '').toLowerCase();
+        return cueLower.includes(keyword);
+      });
+      if (matched) keywordMatches.push(file.basename);
+    }
+
+    // AI search
+    let aiMatches = [];
+    let aiWarning = null;
+
+    if (!this.settings.anthropicApiKey) {
+      aiWarning = '⚠ no API key set — keyword search only (add key in plugin settings)';
+    } else {
+      try {
+        const prompt = `Given this cue: "${cueText}"\n\nHere are the available problem pages:\n${problemNames.map(n => `- ${n}`).join('\n')}\n\nReturn a JSON array of page names from the list above that are relevant to this cue. Only return names from the list. Return ONLY a raw JSON array with no markdown, no code fences, no explanation. Example: ["Stress", "Anxiety"]`;
+
+        const response = await requestUrl({
+          url: 'https://api.anthropic.com/v1/messages',
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-api-key': this.settings.anthropicApiKey,
+            'anthropic-version': '2023-06-01',
+          },
+          body: JSON.stringify({
+            model: 'claude-haiku-4-5-20251001',
+            max_tokens: 256,
+            messages: [{ role: 'user', content: prompt }],
+          }),
+        });
+
+        if (response.status < 200 || response.status >= 300) {
+          throw new Error(`API error ${response.status}: ${response.text}`);
+        }
+
+        const data = response.json;
+        const raw = (data.content?.[0]?.text ?? '[]').replace(/^```[a-z]*\n?/i, '').replace(/```$/, '').trim();
+        const parsed = JSON.parse(raw);
+        const keywordSet = new Set(keywordMatches);
+        // Validate names exist in Problems/ and aren't already in keyword results
+        aiMatches = parsed
+          .filter(name => problemNames.includes(name) && !keywordSet.has(name));
+      } catch (e) {
+        aiWarning = `⚠ AI search failed — keyword search only (${e.message})`;
+      }
+    }
+
+    return { keywordMatches, aiMatches, aiWarning };
+  }
+
   async onload() {
+    await this.loadSettings();
+    this.addSettingTab(new LearningLoopSettingTab(this.app, this));
+    console.log('Learning Loop plugin loaded');
+
     this.addRibbonIcon('repeat-2', 'Learning Loop: Step', () => {
       this.app.commands.executeCommandById('learning-loop:step');
     });
@@ -90,27 +169,21 @@ class LearningLoopPlugin extends Plugin {
               if (line.match(/^(\s*)/)[1].length <= cueIndentLen) break;
               cueText += ' ' + line.replace(/^[\s\t]*-\s*/, '');
             }
-            cueText = cueText.trim().toLowerCase();
+            cueText = cueText.trim();
             if (!cueText) return;
 
-            const matches = [];
-            const problemFiles = this.app.vault.getFiles().filter(f => f.extension === 'md');
-            for (const file of problemFiles) {
-              const cache = this.app.metadataCache.getFileCache(file);
-              if (!cache || !cache.frontmatter) continue;
-              const tags = parseFrontMatterTags(cache.frontmatter);
-              if (!tags) continue;
-              const matched = tags.some(tag => {
-                const keyword = tag.replace(/^#/, '').toLowerCase();
-                return cueText.includes(keyword);
-              });
-              if (matched) matches.push(`[[${file.basename}]]`);
-            }
+            const allFiles = this.app.vault.getFiles();
+            const { keywordMatches, aiMatches, aiWarning } = await this.runSearch(cueText, allFiles);
 
-            const outputLines = matches.map(m => '\n\t\t- ' + m).join('');
+            let outputLines = '';
+            for (const name of keywordMatches) outputLines += '\n\t\t- [[' + name + ']]';
+            for (const name of aiMatches) outputLines += '\n\t\t- [[' + name + ']] (ai)';
+            if (aiWarning) outputLines += '\n\t\t- ' + aiWarning;
+
             const lineLen = editor.getLine(blockEnd).length;
             editor.replaceRange('\n\t- LL output' + outputLines, { line: blockEnd, ch: lineLen });
-            const newLine = blockEnd + 1 + matches.length;
+            const totalAdded = keywordMatches.length + aiMatches.length + (aiWarning ? 1 : 0);
+            const newLine = blockEnd + 1 + totalAdded;
             editor.setCursor({ line: newLine, ch: editor.getLine(newLine).length });
             this.enterInsertMode(editor);
             return;
@@ -247,6 +320,28 @@ class LearningLoopPlugin extends Plugin {
   }
 
   onunload() {}
+}
+
+class LearningLoopSettingTab extends PluginSettingTab {
+  constructor(app, plugin) {
+    super(app, plugin);
+    this.plugin = plugin;
+  }
+
+  display() {
+    const { containerEl } = this;
+    containerEl.empty();
+    new Setting(containerEl)
+      .setName('Anthropic API key')
+      .setDesc('Used for AI-powered page recommendations in LL output. Get a key at console.anthropic.com.')
+      .addText(text => text
+        .setPlaceholder('sk-ant-...')
+        .setValue(this.plugin.settings.anthropicApiKey)
+        .onChange(async (value) => {
+          this.plugin.settings.anthropicApiKey = value.trim();
+          await this.plugin.saveSettings();
+        }));
+  }
 }
 
 module.exports = LearningLoopPlugin;
