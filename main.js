@@ -57,49 +57,67 @@ class LearningLoopPlugin extends Plugin {
           }
         }
 
-        // If inside an LL block, run the Review step machine
+        // If inside an LL block, run the step state machine
         if (insideBlock) {
 
-          // Find the Review line
+          // Find key sections
+          let cueLineIdx = -1;
+          let llOutputLineIdx = -1;
           let reviewLineIdx = -1;
           for (let i = blockStart + 1; i <= blockEnd; i++) {
-            if (editor.getLine(i).trim() === '- Review') { reviewLineIdx = i; break; }
+            const lineText = editor.getLine(i).trim();
+            if (lineText === '- cue') cueLineIdx = i;
+            if (lineText === '- LL output') llOutputLineIdx = i;
+            if (lineText === '- Review') reviewLineIdx = i;
           }
 
-          // Step 1: no Review block yet — first try keyword search on current text
-          if (reviewLineIdx === -1) {
-            const selectionLower = text.toLowerCase();
-            const hasContent = selectionLower.replace(/[-\s\t\[\]|]/g, '').length > 0;
-            if (hasContent) {
-              const matches = [];
-              const problemFiles = this.app.vault.getFiles().filter(
-                (f) => f.extension === 'md'
-              );
-              for (const file of problemFiles) {
-                const cache = this.app.metadataCache.getFileCache(file);
-                if (!cache || !cache.frontmatter) continue;
-                const tags = parseFrontMatterTags(cache.frontmatter);
-                if (!tags) continue;
-                const matched = tags.some((tag) => {
-                  const keyword = tag.replace(/^#/, '').toLowerCase();
-                  return selectionLower.includes(keyword);
-                });
-                if (matched) matches.push(`[[${file.basename}]]`);
-              }
-              if (matches.length > 0) {
-                const endCursor = editor.getCursor('to');
-                const currentLine = editor.getLine(endCursor.line);
-                const prefixMatch = currentLine.match(/^(\s*(?:[-*]\s)?)/);
-                const prefix = prefixMatch ? prefixMatch[1] : '';
-                const output = matches.map((m) => prefix + m).join('\n');
-                editor.replaceRange('\n' + output + '\n' + prefix, { line: endCursor.line, ch: currentLine.length });
-                const newLine = endCursor.line + matches.length + 1;
-                editor.setCursor({ line: newLine, ch: prefix.length });
-                this.enterInsertMode(editor);
-                return;
-              }
+          // Step A: no cue yet → insert cue section with nested bullet
+          if (cueLineIdx === -1) {
+            const lineLen = editor.getLine(blockEnd).length;
+            editor.replaceRange('\n\t- cue\n\t\t- ', { line: blockEnd, ch: lineLen });
+            editor.setCursor({ line: blockEnd + 2, ch: '\t\t- '.length });
+            this.enterInsertMode(editor);
+            return;
+          }
+
+          // Step B: has cue but no LL output → read cue text, search, insert LL output
+          if (llOutputLineIdx === -1) {
+            const cueIndentLen = editor.getLine(cueLineIdx).match(/^(\s*)/)[1].length;
+            let cueText = '';
+            for (let i = cueLineIdx + 1; i <= blockEnd; i++) {
+              const line = editor.getLine(i);
+              if (!line.trim()) continue;
+              if (line.match(/^(\s*)/)[1].length <= cueIndentLen) break;
+              cueText += ' ' + line.replace(/^[\s\t]*-\s*/, '');
             }
-            // No matches (or empty line): proceed to Review
+            cueText = cueText.trim().toLowerCase();
+            if (!cueText) return;
+
+            const matches = [];
+            const problemFiles = this.app.vault.getFiles().filter(f => f.extension === 'md');
+            for (const file of problemFiles) {
+              const cache = this.app.metadataCache.getFileCache(file);
+              if (!cache || !cache.frontmatter) continue;
+              const tags = parseFrontMatterTags(cache.frontmatter);
+              if (!tags) continue;
+              const matched = tags.some(tag => {
+                const keyword = tag.replace(/^#/, '').toLowerCase();
+                return cueText.includes(keyword);
+              });
+              if (matched) matches.push(`[[${file.basename}]]`);
+            }
+
+            const outputLines = matches.map(m => '\n\t\t- ' + m).join('');
+            const lineLen = editor.getLine(blockEnd).length;
+            editor.replaceRange('\n\t- LL output' + outputLines, { line: blockEnd, ch: lineLen });
+            const newLine = blockEnd + 1 + matches.length;
+            editor.setCursor({ line: newLine, ch: editor.getLine(newLine).length });
+            this.enterInsertMode(editor);
+            return;
+          }
+
+          // Step C: has cue and LL output but no Review → insert Review
+          if (reviewLineIdx === -1) {
             const lineLen = editor.getLine(blockEnd).length;
             editor.replaceRange('\n\t- Review\n\t\t- tags: ', { line: blockEnd, ch: lineLen });
             editor.setCursor({ line: blockEnd + 2, ch: '\t\t- tags: '.length });
@@ -173,10 +191,10 @@ class LearningLoopPlugin extends Plugin {
         // But not if we're already indented inside a Learning Loop Trace block
         const currentLineIndented = editor.getLine(cursor.line).match(/^\s/);
         if (!text.replace(/[-\s]/g, '') && !(insideBlock && currentLineIndented)) {
-          const insertion = '- [[Learning Loop Trace]]\n\t- ';
+          const insertion = '- [[Learning Loop Trace]]\n\t- cue\n\t\t- ';
           const lineLen = editor.getLine(cursor.line).length;
           editor.replaceRange(insertion, { line: cursor.line, ch: 0 }, { line: cursor.line, ch: lineLen });
-          editor.setCursor({ line: cursor.line + 1, ch: 3 });
+          editor.setCursor({ line: cursor.line + 2, ch: '\t\t- '.length });
           this.enterInsertMode(editor);
           return;
         }
