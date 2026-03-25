@@ -18,14 +18,14 @@ class LearningLoopPlugin extends Plugin {
   }
 
   async onload() {
-    this.addRibbonIcon('lasso', 'Learning Loop: Step', () => {
+    this.addRibbonIcon('repeat-2', 'Learning Loop: Step', () => {
       this.app.commands.executeCommandById('learning-loop:step');
     });
 
     this.addCommand({
       id: 'step',
       name: 'Step',
-      icon: 'lasso',
+      icon: 'repeat-2',
       editorCallback: async (editor) => {
         let text = editor.getSelection();
         const cursor = editor.getCursor();
