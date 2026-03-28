@@ -1,6 +1,6 @@
 const { Plugin, PluginSettingTab, Setting, parseFrontMatterTags, requestUrl } = require('obsidian');
 
-const DEFAULT_SETTINGS = { anthropicApiKey: '' };
+const DEFAULT_SETTINGS = { anthropicApiKey: '', smartOpenOnCmdClick: false };
 
 class LearningLoopPlugin extends Plugin {
   enterInsertMode(editor) {
@@ -92,8 +92,55 @@ class LearningLoopPlugin extends Plugin {
     return { keywordMatches, aiMatches, aiWarning };
   }
 
+  smartOpenRightPane() {
+    const workspace = this.app.workspace;
+    const rootChildren = workspace.rootSplit.children;
+
+    if (rootChildren.length >= 2) {
+      const activeContainer = workspace.activeLeaf?.parent;
+      const otherContainer = rootChildren.find(child => child !== activeContainer);
+      if (otherContainer) {
+        const otherLeaf = otherContainer.children ? otherContainer.children[0] : otherContainer;
+        if (otherLeaf) workspace.setActiveLeaf(otherLeaf, { focus: true });
+      }
+    } else {
+      const newLeaf = workspace.getLeaf('split', 'vertical');
+      workspace.setActiveLeaf(newLeaf, { focus: true });
+    }
+  }
+
+  setupCmdClickHandler() {
+    const plugin = this;
+    const workspace = this.app.workspace;
+    const original = workspace.openLinkText.bind(workspace);
+    this._originalOpenLinkText = original;
+
+    workspace.openLinkText = async function(linktext, sourcePath, newLeaf, openState) {
+      if (newLeaf === 'split') {
+        plugin.smartOpenRightPane();
+        return original(linktext, sourcePath, 'tab', openState);
+      }
+      return original(linktext, sourcePath, newLeaf, openState);
+    };
+  }
+
+  teardownCmdClickHandler() {
+    if (this._originalOpenLinkText) {
+      this.app.workspace.openLinkText = this._originalOpenLinkText;
+      this._originalOpenLinkText = null;
+    }
+  }
+
   async onload() {
     await this.loadSettings();
+    this.addCommand({
+      id: 'smart-open-right',
+      name: 'Smart Open Right',
+      callback: () => this.smartOpenRightPane()
+    });
+
+    if (this.settings.smartOpenOnCmdClick) this.setupCmdClickHandler();
+
     this.addSettingTab(new LearningLoopSettingTab(this.app, this));
     console.log('Learning Loop plugin loaded');
 
@@ -319,7 +366,9 @@ class LearningLoopPlugin extends Plugin {
 
   }
 
-  onunload() {}
+  onunload() {
+    this.teardownCmdClickHandler();
+  }
 }
 
 class LearningLoopSettingTab extends PluginSettingTab {
@@ -340,6 +389,17 @@ class LearningLoopSettingTab extends PluginSettingTab {
         .onChange(async (value) => {
           this.plugin.settings.anthropicApiKey = value.trim();
           await this.plugin.saveSettings();
+        }));
+    new Setting(containerEl)
+      .setName('Smart open on Cmd+Opt+Click')
+      .setDesc('When enabled, Cmd+Opt+clicking an internal link opens it using smart open right (max 2 panes).')
+      .addToggle(toggle => toggle
+        .setValue(this.plugin.settings.smartOpenOnCmdClick)
+        .onChange(async (value) => {
+          this.plugin.settings.smartOpenOnCmdClick = value;
+          await this.plugin.saveSettings();
+          if (value) this.plugin.setupCmdClickHandler();
+          else this.plugin.teardownCmdClickHandler();
         }));
   }
 }
