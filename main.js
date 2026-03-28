@@ -167,7 +167,7 @@ class LearningLoopPlugin extends Plugin {
         for (let i = cursor.line - 1; i >= 0; i--) {
           const line = editor.getLine(i);
           if (line.length > 0 && !line.match(/^\s/)) {
-            if (line.trim() === '- [[Learning Loop Trace]]') {
+            if (line.trim().startsWith('- [[Learning Loop Trace]]')) {
               blockStart = i;
               blockEnd = blockStart;
               for (let j = blockStart + 1; j < totalLines; j++) {
@@ -183,126 +183,56 @@ class LearningLoopPlugin extends Plugin {
           }
         }
 
-        // If inside an LL block, run the step state machine
+        // If inside an LL block, run Step 2: search cue and insert all remaining sections
         if (insideBlock) {
 
           // Find key sections
           let cueLineIdx = -1;
           let llOutputLineIdx = -1;
-          let reviewLineIdx = -1;
           for (let i = blockStart + 1; i <= blockEnd; i++) {
             const lineText = editor.getLine(i).trim();
             if (lineText === '- cue') cueLineIdx = i;
             if (lineText === '- LL output') llOutputLineIdx = i;
-            if (lineText === '- Review') reviewLineIdx = i;
           }
 
-          // Step A: no cue yet → insert cue section with nested bullet
-          if (cueLineIdx === -1) {
-            const lineLen = editor.getLine(blockEnd).length;
-            editor.replaceRange('\n\t- cue\n\t\t- ', { line: blockEnd, ch: lineLen });
-            editor.setCursor({ line: blockEnd + 2, ch: '\t\t- '.length });
-            this.enterInsertMode(editor);
-            return;
-          }
+          // Already completed Step 2 — nothing to do
+          if (llOutputLineIdx !== -1) return;
 
-          // Step B: has cue but no LL output → read cue text, search, insert LL output
-          if (llOutputLineIdx === -1) {
-            const cueIndentLen = editor.getLine(cueLineIdx).match(/^(\s*)/)[1].length;
-            let cueText = '';
-            for (let i = cueLineIdx + 1; i <= blockEnd; i++) {
-              const line = editor.getLine(i);
-              if (!line.trim()) continue;
-              if (line.match(/^(\s*)/)[1].length <= cueIndentLen) break;
-              cueText += ' ' + line.replace(/^[\s\t]*-\s*/, '');
-            }
-            cueText = cueText.trim();
-            if (!cueText) return;
+          // No cue section yet — nothing to do
+          if (cueLineIdx === -1) return;
 
-            const allFiles = this.app.vault.getFiles();
-            const { keywordMatches, aiMatches, aiWarning } = await this.runSearch(cueText, allFiles);
-
-            let outputLines = '';
-            for (const name of keywordMatches) outputLines += '\n\t\t- [[' + name + ']]';
-            for (const name of aiMatches) outputLines += '\n\t\t- [[' + name + ']] (ai)';
-            if (aiWarning) outputLines += '\n\t\t- ' + aiWarning;
-
-            const lineLen = editor.getLine(blockEnd).length;
-            editor.replaceRange('\n\t- LL output' + outputLines, { line: blockEnd, ch: lineLen });
-            const totalAdded = keywordMatches.length + aiMatches.length + (aiWarning ? 1 : 0);
-            const newLine = blockEnd + 1 + totalAdded;
-            editor.setCursor({ line: newLine, ch: editor.getLine(newLine).length });
-            this.enterInsertMode(editor);
-            return;
-          }
-
-          // Step C: has cue and LL output but no Review → insert Review
-          if (reviewLineIdx === -1) {
-            const lineLen = editor.getLine(blockEnd).length;
-            editor.replaceRange('\n\t- Review\n\t\t- tags: ', { line: blockEnd, ch: lineLen });
-            editor.setCursor({ line: blockEnd + 2, ch: '\t\t- tags: '.length });
-            this.enterInsertMode(editor);
-            return;
-          }
-
-          // Find tags and pages lines within the Review block
-          const reviewIndentLen = editor.getLine(reviewLineIdx).match(/^(\s*)/)[1].length;
-          let tagsLineIdx = -1;
-          let pagesLineIdx = -1;
-          let reviewEnd = reviewLineIdx;
-          for (let i = reviewLineIdx + 1; i <= blockEnd; i++) {
+          // Step 2: read cue, search, insert LL output + Pages LL should have output + Review
+          const cueIndentLen = editor.getLine(cueLineIdx).match(/^(\s*)/)[1].length;
+          let cueText = '';
+          for (let i = cueLineIdx + 1; i <= blockEnd; i++) {
             const line = editor.getLine(i);
             if (!line.trim()) continue;
-            if (line.match(/^(\s*)/)[1].length <= reviewIndentLen) break;
-            reviewEnd = i;
-            if (line.trim().startsWith('- tags:')) tagsLineIdx = i;
-            if (line.trim().startsWith('- pages:')) pagesLineIdx = i;
+            if (line.match(/^(\s*)/)[1].length <= cueIndentLen) break;
+            cueText += ' ' + line.replace(/^[\s\t]*-\s*/, '');
           }
+          cueText = cueText.trim();
+          if (!cueText) return;
 
-          // Step 1b: Review exists but no tags line
-          if (tagsLineIdx === -1) {
-            const lineLen = editor.getLine(reviewLineIdx).length;
-            editor.replaceRange('\n\t\t- tags: ', { line: reviewLineIdx, ch: lineLen });
-            editor.setCursor({ line: reviewLineIdx + 1, ch: '\t\t- tags: '.length });
-            this.enterInsertMode(editor);
-            return;
-          }
+          const allFiles = this.app.vault.getFiles();
+          const { keywordMatches, aiMatches, aiWarning } = await this.runSearch(cueText, allFiles);
 
-          // Step 2: tags exists but no pages line
-          if (pagesLineIdx === -1) {
-            const lineLen = editor.getLine(tagsLineIdx).length;
-            editor.replaceRange('\n\t\t\t- pages: ', { line: tagsLineIdx, ch: lineLen });
-            editor.setCursor({ line: tagsLineIdx + 1, ch: '\t\t\t- pages: '.length });
-            this.enterInsertMode(editor);
-            return;
-          }
+          let outputLines = '';
+          for (const name of keywordMatches) outputLines += '\n\t\t- [[' + name + ']]';
+          for (const name of aiMatches) outputLines += '\n\t\t- [[' + name + ']] (ai)';
+          if (aiWarning) outputLines += '\n\t\t- ' + aiWarning;
 
-          // Step 3: tags and pages both exist — apply tags to pages, add continuation bullet
-          const tagsContent = editor.getLine(tagsLineIdx).replace(/^[\s\t]*-\s*tags:\s*/, '');
-          const pagesContent = editor.getLine(pagesLineIdx).replace(/^[\s\t]*-\s*pages:\s*/, '');
-          const reviewTags = tagsContent.split(',').map((t) => t.trim()).filter(Boolean);
-          const pageNames = [...pagesContent.matchAll(/\[\[(.+?)\]\]/g)].map((m) => m[1].split('|')[0].trim());
+          const insertion = '\n\t- LL output' + outputLines +
+            '\n\t- Pages LL should have output\n\t\t- ' +
+            '\n\t- Review\n\t\t- ';
 
-          for (const pageName of pageNames) {
-            const file = this.app.vault.getFiles().find((f) => f.basename === pageName);
-            if (!file) continue;
-            await this.app.fileManager.processFrontMatter(file, (fm) => {
-              if (!fm.tags) fm.tags = [];
-              for (const tag of reviewTags) {
-                if (!fm.tags.includes(tag)) fm.tags.push(tag);
-              }
-            });
-          }
+          const lineLen = editor.getLine(blockEnd).length;
+          editor.replaceRange(insertion, { line: blockEnd, ch: lineLen });
 
-          const lastReviewLine = editor.getLine(reviewEnd).trim();
-          const isTagsOrPages = lastReviewLine.startsWith('- tags:') || lastReviewLine.startsWith('- pages:');
-          if (isTagsOrPages) {
-            const lineLen = editor.getLine(reviewEnd).length;
-            editor.replaceRange('\n\t\t- ', { line: reviewEnd, ch: lineLen });
-            editor.setCursor({ line: reviewEnd + 1, ch: '\t\t- '.length });
-          } else {
-            editor.setCursor({ line: reviewEnd, ch: editor.getLine(reviewEnd).length });
-          }
+          // Place cursor at the blank bullet under "Pages LL should have output"
+          const totalOutputLines = keywordMatches.length + aiMatches.length + (aiWarning ? 1 : 0);
+          const pagesLabelLine = blockEnd + 1 + totalOutputLines + 1; // after "- LL output" header + output items + "- Pages LL should have output"
+          const cursorLine = pagesLabelLine + 1;
+          editor.setCursor({ line: cursorLine, ch: '\t\t- '.length });
           this.enterInsertMode(editor);
           return;
         }
@@ -311,7 +241,7 @@ class LearningLoopPlugin extends Plugin {
         // But not if we're already indented inside a Learning Loop Trace block
         const currentLineIndented = editor.getLine(cursor.line).match(/^\s/);
         if (!text.replace(/[-\s]/g, '') && !(insideBlock && currentLineIndented)) {
-          const insertion = '- [[Learning Loop Trace]]\n\t- cue\n\t\t- ';
+          const insertion = '- [[Learning Loop Trace]] %% fold %%\n\t- cue\n\t\t- ';
           const lineLen = editor.getLine(cursor.line).length;
           editor.replaceRange(insertion, { line: cursor.line, ch: 0 }, { line: cursor.line, ch: lineLen });
           editor.setCursor({ line: cursor.line + 2, ch: '\t\t- '.length });
