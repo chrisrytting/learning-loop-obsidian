@@ -3,7 +3,7 @@ This Obsidian Plugin helps you keep track of the behaviors that do and don't wor
 # A Concrete Example
 Here's a concrete example (skip to "How it works" if you just want to know that :) ): Let's say I'm living my life on Jan 15 and suddenly I notice I'm feeling very anxious. It's unpleasant. I ask "How can I feel less anxious?" I try breathwork, and it doesn't calm me down. I try just plowing through the feeling, it doesn't calm me down. I finally try stopping and journaling for 20 minutes, and it calms me down. The pain here was anxiety, and the ineffective solutions were 
 
-So I would add the following content to an [[Anxiety]] page in my graph.
+So I would add the following content to an [[Learning Loop Instructions/Examples/Problems/Untitled/Anxiety]] page in my graph.
 > - solutions
 > 	- Journal for 20 minutes
 > 		- Tried on Jan 15, 2026. Worked great
@@ -13,9 +13,9 @@ So I would add the following content to an [[Anxiety]] page in my graph.
 > 	- ignore the feeling, plow through
 > 		- Tried on Jan 15, 2026. Still felt awful
 
-Now I have a resource (the [[Anxiety]] page) for solving anxiety, grounded in what's worked and hasn't worked in the past.
+Now I have a resource (the [[Learning Loop Instructions/Examples/Problems/Untitled/Anxiety]] page) for solving anxiety, grounded in what's worked and hasn't worked in the past.
 
-I can also continue gathering data (e.g., if I try these solutions again on Feb 3, a few weeks later, I could add my observations on how well they work then, fleshing out the [[Anxiety]] page.)
+I can also continue gathering data (e.g., if I try these solutions again on Feb 3, a few weeks later, I could add my observations on how well they work then, fleshing out the [[Learning Loop Instructions/Examples/Problems/Untitled/Anxiety]] page.)
 
 Additionally, I might have these solutions spread out over several relevant pages, e.g., similar negative pages such as [[Legacy Tiny Obsidian/Stress]], [[Overwhelmed]], as well as related but non-synonymic pages such as [[Calm]] and [[Focus]].
 

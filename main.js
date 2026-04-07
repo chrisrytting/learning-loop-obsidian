@@ -84,6 +84,28 @@ class LearningLoopPlugin extends Plugin {
     await this.saveData(this.settings);
   }
 
+  async insertSearchResults(editor, cueText, blockEnd) {
+    const allFiles = this.app.vault.getFiles();
+    const { keywordMatches, aiMatches, aiWarning } = await this.runSearch(cueText, allFiles);
+
+    let outputLines = '';
+    for (const name of keywordMatches) outputLines += '\n\t\t- [[' + name + ']]';
+    for (const name of aiMatches) outputLines += '\n\t\t- [[' + name + ']] (ai)';
+    if (aiWarning) outputLines += '\n\t\t- ' + aiWarning;
+
+    const insertion = '\n\t- Learning Loop Output' + outputLines +
+      '\n\t- Review\n\t\t- ';
+
+    const lineLen = editor.getLine(blockEnd).length;
+    editor.replaceRange(insertion, { line: blockEnd, ch: lineLen });
+
+    const totalOutputLines = keywordMatches.length + aiMatches.length + (aiWarning ? 1 : 0);
+    const reviewLabelLine = blockEnd + 1 + totalOutputLines + 1;
+    const cursorLine = reviewLabelLine + 1;
+    editor.setCursor({ line: cursorLine, ch: '\t\t- '.length });
+    this.enterInsertMode(editor);
+  }
+
   // Returns { keywordMatches: string[], aiMatches: string[], aiWarning: string|null }
   // keywordMatches and aiMatches are basenames (no brackets), deduplicated between sets.
   async runSearch(cueText, allFiles) {
@@ -153,16 +175,19 @@ class LearningLoopPlugin extends Plugin {
     const workspace = this.app.workspace;
     const rootChildren = workspace.rootSplit.children;
 
-    if (rootChildren.length >= 2) {
-      const activeContainer = workspace.activeLeaf?.parent;
-      const otherContainer = rootChildren.find(child => child !== activeContainer);
-      if (otherContainer) {
-        const otherLeaf = otherContainer.children ? otherContainer.children[0] : otherContainer;
-        if (otherLeaf) workspace.setActiveLeaf(otherLeaf, { focus: true });
-      }
+    const activeContainer = workspace.activeLeaf?.parent;
+    const activeIndex = rootChildren.indexOf(activeContainer);
+    const rightIndex = activeIndex + 1;
+
+    if (rightIndex < rootChildren.length) {
+      const rightContainer = rootChildren[rightIndex];
+      const rightLeaf = rightContainer.children ? rightContainer.children[0] : rightContainer;
+      if (rightLeaf) workspace.setActiveLeaf(rightLeaf, { focus: true });
+      return { created: false };
     } else {
       const newLeaf = workspace.getLeaf('split', 'vertical');
       workspace.setActiveLeaf(newLeaf, { focus: true });
+      return { created: true };
     }
   }
 
@@ -174,8 +199,8 @@ class LearningLoopPlugin extends Plugin {
 
     workspace.openLinkText = async function(linktext, sourcePath, newLeaf, openState) {
       if (newLeaf === 'split') {
-        plugin.smartOpenRightPane();
-        return original(linktext, sourcePath, 'tab', openState);
+        const { created } = plugin.smartOpenRightPane();
+        return original(linktext, sourcePath, created ? false : 'tab', openState);
       }
       return original(linktext, sourcePath, newLeaf, openState);
     };
@@ -202,20 +227,33 @@ class LearningLoopPlugin extends Plugin {
     this.addSettingTab(new LearningLoopSettingTab(this.app, this));
     console.log('Learning Loop plugin loaded');
 
-    this.addRibbonIcon('repeat-2', 'Learning Loop: Step', () => {
-      this.app.commands.executeCommandById('learning-loop:step');
+    this.addRibbonIcon('repeat-2', 'Learning Loop: Help', () => {
+      this.app.commands.executeCommandById('learning-loop:help');
     });
 
     this.addCommand({
-      id: 'step',
-      name: 'Step',
+      id: 'help',
+      name: 'Help',
       icon: 'repeat-2',
       editorCallback: async (editor) => {
-        let text = editor.getSelection();
+        const selection = editor.getSelection();
         const cursor = editor.getCursor();
-        if (!text) {
-          text = editor.getLine(cursor.line);
+
+        // If text is highlighted, cut it and create a trace with User Thought / Feeling + User Response
+        if (selection) {
+          const from = editor.getCursor('from');
+          const to = editor.getCursor('to');
+          const thoughtLines = selection.trim().split('\n').filter(l => l.trim());
+          const thoughtContent = thoughtLines.map(l => '\t\t- ' + l.replace(/^[\s\t]*[-*]?\s*/, '')).join('\n');
+          const traceInsertion = '- [[Learning Loop Trace]] %% fold %%\n\t- User Thought / Feeling\n' + thoughtContent + '\n\t- User Response\n\t\t- ';
+          editor.replaceRange(traceInsertion, { line: from.line, ch: 0 }, { line: to.line, ch: editor.getLine(to.line).length });
+          const responseLine = from.line + 2 + thoughtLines.length + 1;
+          editor.setCursor({ line: responseLine, ch: '\t\t- '.length });
+          this.enterInsertMode(editor);
+          return;
         }
+
+        let text = editor.getLine(cursor.line);
 
         // Check if already inside a Learning Loop Trace block
         let insideBlock = false;
@@ -241,57 +279,58 @@ class LearningLoopPlugin extends Plugin {
           }
         }
 
-        // If inside an LL block, run Step 2: search cue and insert all remaining sections
+        // If inside an LL block, advance to the next step
         if (insideBlock) {
 
           // Find key sections
-          let cueLineIdx = -1;
+          let thoughtLineIdx = -1;
+          let responseLineIdx = -1;
           let llOutputLineIdx = -1;
+          let reviewLineIdx = -1;
           for (let i = blockStart + 1; i <= blockEnd; i++) {
             const lineText = editor.getLine(i).trim();
-            if (lineText === '- cue') cueLineIdx = i;
-            if (lineText === '- LL output') llOutputLineIdx = i;
+            if (lineText === '- User Thought / Feeling') thoughtLineIdx = i;
+            if (lineText === '- User Response') responseLineIdx = i;
+            if (lineText === '- Learning Loop Output') llOutputLineIdx = i;
+            if (lineText === '- Review') reviewLineIdx = i;
           }
 
-          // Already completed Step 2 — nothing to do
-          if (llOutputLineIdx !== -1) return;
+          // Review exists — exit the trace by inserting a new line after block
+          if (reviewLineIdx !== -1) {
+            const lineLen = editor.getLine(blockEnd).length;
+            editor.replaceRange('\n', { line: blockEnd, ch: lineLen });
+            editor.setCursor({ line: blockEnd + 1, ch: 0 });
+            this.enterInsertMode(editor);
+            return;
+          }
 
-          // No cue section yet — nothing to do
-          if (cueLineIdx === -1) return;
+          // No thought section yet — nothing to do
+          if (thoughtLineIdx === -1) return;
 
-          // Step 2: read cue, search, insert LL output + Pages LL should have output + Review
-          const cueIndentLen = editor.getLine(cueLineIdx).match(/^(\s*)/)[1].length;
-          let cueText = '';
-          for (let i = cueLineIdx + 1; i <= blockEnd; i++) {
+          // If thought exists but no User Response yet, insert User Response
+          if (responseLineIdx === -1) {
+            const insertion = '\n\t- User Response\n\t\t- ';
+            const lineLen = editor.getLine(blockEnd).length;
+            editor.replaceRange(insertion, { line: blockEnd, ch: lineLen });
+            const responseBulletLine = blockEnd + 2;
+            editor.setCursor({ line: responseBulletLine, ch: '\t\t- '.length });
+            this.enterInsertMode(editor);
+            return;
+          }
+
+          // User Response exists — run search using thought text
+          const thoughtIndentLen = editor.getLine(thoughtLineIdx).match(/^(\s*)/)[1].length;
+          let thoughtText = '';
+          for (let i = thoughtLineIdx + 1; i <= blockEnd; i++) {
             const line = editor.getLine(i);
             if (!line.trim()) continue;
-            if (line.match(/^(\s*)/)[1].length <= cueIndentLen) break;
-            cueText += ' ' + line.replace(/^[\s\t]*-\s*/, '');
+            if (line.match(/^(\s*)/)[1].length <= thoughtIndentLen) break;
+            thoughtText += ' ' + line.replace(/^[\s\t]*-\s*/, '');
           }
-          cueText = cueText.trim();
-          if (!cueText) return;
+          thoughtText = thoughtText.trim();
+          if (!thoughtText) return;
 
-          const allFiles = this.app.vault.getFiles();
-          const { keywordMatches, aiMatches, aiWarning } = await this.runSearch(cueText, allFiles);
-
-          let outputLines = '';
-          for (const name of keywordMatches) outputLines += '\n\t\t- [[' + name + ']]';
-          for (const name of aiMatches) outputLines += '\n\t\t- [[' + name + ']] (ai)';
-          if (aiWarning) outputLines += '\n\t\t- ' + aiWarning;
-
-          const insertion = '\n\t- LL output' + outputLines +
-            '\n\t- Pages LL should have output\n\t\t- ' +
-            '\n\t- Review\n\t\t- ';
-
-          const lineLen = editor.getLine(blockEnd).length;
-          editor.replaceRange(insertion, { line: blockEnd, ch: lineLen });
-
-          // Place cursor at the blank bullet under "Pages LL should have output"
-          const totalOutputLines = keywordMatches.length + aiMatches.length + (aiWarning ? 1 : 0);
-          const pagesLabelLine = blockEnd + 1 + totalOutputLines + 1; // after "- LL output" header + output items + "- Pages LL should have output"
-          const cursorLine = pagesLabelLine + 1;
-          editor.setCursor({ line: cursorLine, ch: '\t\t- '.length });
-          this.enterInsertMode(editor);
+          await this.insertSearchResults(editor, thoughtText, blockEnd);
           return;
         }
 
@@ -299,7 +338,7 @@ class LearningLoopPlugin extends Plugin {
         // But not if we're already indented inside a Learning Loop Trace block
         const currentLineIndented = editor.getLine(cursor.line).match(/^\s/);
         if (!text.replace(/[-\s]/g, '') && !(insideBlock && currentLineIndented)) {
-          const insertion = '- [[Learning Loop Trace]] %% fold %%\n\t- cue\n\t\t- ';
+          const insertion = '- [[Learning Loop Trace]] %% fold %%\n\t- User Thought / Feeling\n\t\t- ';
           const lineLen = editor.getLine(cursor.line).length;
           editor.replaceRange(insertion, { line: cursor.line, ch: 0 }, { line: cursor.line, ch: lineLen });
           editor.setCursor({ line: cursor.line + 2, ch: '\t\t- '.length });
@@ -307,47 +346,14 @@ class LearningLoopPlugin extends Plugin {
           return;
         }
 
-        const selectionLower = text.toLowerCase();
-        const matches = [];
-
-        const problemFiles = this.app.vault.getFiles().filter(
-          (f) => f.extension === 'md'
-        );
-
-        for (const file of problemFiles) {
-          const cache = this.app.metadataCache.getFileCache(file);
-          if (!cache || !cache.frontmatter) continue;
-
-          const tags = parseFrontMatterTags(cache.frontmatter);
-          if (!tags) continue;
-
-          const matched = tags.some((tag) => {
-            const keyword = tag.replace(/^#/, '').toLowerCase();
-            return selectionLower.includes(keyword);
-          });
-
-          if (matched) {
-            const name = file.basename;
-            matches.push(`[[${name}]]`);
-          }
-        }
-
-        if (matches.length === 0) return;
-
-        const endCursor = editor.getCursor('to');
-        const currentLine = editor.getLine(endCursor.line);
-        const lineEnd = currentLine.length;
-
-        // Match leading whitespace and optional list marker (- or *)
-        const prefixMatch = currentLine.match(/^(\s*(?:[-*]\s)?)/);
-        const prefix = prefixMatch ? prefixMatch[1] : '';
-
-        const output = matches.map((m) => prefix + m).join('\n');
-        const insertion = '\n' + output + '\n' + prefix;
-        editor.replaceRange(insertion, { line: endCursor.line, ch: lineEnd });
-
-        const newLine = endCursor.line + matches.length + 1;
-        editor.setCursor({ line: newLine, ch: prefix.length });
+        // Line has text: cut it and create a trace with User Thought / Feeling + User Response
+        const thoughtText = text.replace(/^[\s\t]*[-*]?\s*/, '').trim();
+        if (!thoughtText) return;
+        const traceInsertion = '- [[Learning Loop Trace]] %% fold %%\n\t- User Thought / Feeling\n\t\t- ' + thoughtText + '\n\t- User Response\n\t\t- ';
+        const lineLen = editor.getLine(cursor.line).length;
+        editor.replaceRange(traceInsertion, { line: cursor.line, ch: 0 }, { line: cursor.line, ch: lineLen });
+        const responseLine = cursor.line + 3 + 1;
+        editor.setCursor({ line: responseLine, ch: '\t\t- '.length });
         this.enterInsertMode(editor);
       },
     });

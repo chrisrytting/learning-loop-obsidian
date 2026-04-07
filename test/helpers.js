@@ -2,9 +2,9 @@
 
 /**
  * Creates a mock Obsidian editor backed by an array of strings.
- * Supports the subset of the editor API used by the Step command.
+ * Supports the subset of the editor API used by the Help command.
  */
-function createEditor(lines, cursorLine = 0, cursorCh = 0) {
+function createEditor(lines, cursorLine = 0, cursorCh = 0, selection = null) {
   const doc = [...lines];
   let cursor = { line: cursorLine, ch: cursorCh };
 
@@ -12,8 +12,12 @@ function createEditor(lines, cursorLine = 0, cursorCh = 0) {
     _doc: doc,
     _getCursor: () => ({ ...cursor }),
 
-    getSelection: () => '',
-    getCursor: (which) => ({ ...cursor }),
+    getSelection: () => selection ? selection.text : '',
+    getCursor: (which) => {
+      if (selection && which === 'from') return { ...selection.from };
+      if (selection && which === 'to') return { ...selection.to };
+      return { ...cursor };
+    },
     getLine: (i) => (i >= 0 && i < doc.length ? doc[i] : ''),
     lineCount: () => doc.length,
 
@@ -33,7 +37,7 @@ function createEditor(lines, cursorLine = 0, cursorCh = 0) {
 }
 
 /**
- * Instantiates the plugin and returns the async editorCallback for the Step command.
+ * Instantiates the plugin and returns the async editorCallback for the Help command.
  * Accepts an optional `files` array for vault/metadata mocking.
  */
 async function createPlugin(files = []) {
@@ -62,18 +66,21 @@ async function createPlugin(files = []) {
 
   const plugin = new LearningLoopPlugin();
   plugin.app = app;
+  plugin.manifest = { dir: '/mock/plugin/dir' };
   plugin.enterInsertMode = () => {};
   plugin.addRibbonIcon = () => {};
   plugin.addSettingTab = () => {};
+  plugin.registerEvent = () => {};
   plugin.loadData = async () => ({});
   plugin.saveData = async () => {};
+  plugin.syncVaultFiles = async () => {};
   plugin.addCommand = ({ editorCallback }) => {
     capturedCallback = editorCallback;
   };
 
   await plugin.onload();
 
-  return { step: (editor) => capturedCallback(editor) };
+  return { help: (editor) => capturedCallback(editor) };
 }
 
 module.exports = { createEditor, createPlugin };
