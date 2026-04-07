@@ -21,4 +21,6 @@ async function requestUrl() {
   return { status: 200, json: { content: [{ text: '[]' }] }, text: '' };
 }
 
-module.exports = { Plugin, PluginSettingTab, Setting, parseFrontMatterTags, requestUrl };
+function normalizePath(p) { return p; }
+
+module.exports = { Plugin, PluginSettingTab, Setting, parseFrontMatterTags, requestUrl, normalizePath };

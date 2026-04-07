@@ -84,13 +84,67 @@ class LearningLoopPlugin extends Plugin {
     await this.saveData(this.settings);
   }
 
-  async insertSearchResults(editor, cueText, blockEnd) {
+  // Extract [[wiki-link]] names from editor lines in [startLine+1, endLine]
+  extractLinks(editor, startLine, endLine) {
+    const links = [];
+    const linkRegex = /\[\[([^\]]+)\]\]/g;
+    for (let i = startLine + 1; i <= endLine; i++) {
+      const line = editor.getLine(i);
+      let match;
+      while ((match = linkRegex.exec(line)) !== null) {
+        const raw = match[1];
+        const name = raw.includes('|') ? raw.split('|').pop() : raw.split('/').pop();
+        links.push(name);
+      }
+    }
+    return links;
+  }
+
+  // Convert a vault file to an unambiguous link string: "path/to/Page|Page"
+  fileToLink(file) {
+    return file.path.replace(/\.md$/, '') + '|' + file.basename;
+  }
+
+  // Given page names mentioned in the trace, look up each Problem page's
+  // "Retrieve Pages" frontmatter and return the union of all referenced pages.
+  // Returns [{ name, link }] where link is the full path|alias for [[...]] insertion.
+  async retrieveLinkedPages(mentionedLinks) {
     const allFiles = this.app.vault.getFiles();
-    const { keywordMatches, aiMatches, aiWarning } = await this.runSearch(cueText, allFiles);
+    const problemFiles = allFiles.filter(f => f.extension === 'md' && f.path.startsWith('Problems/'));
+    const problemNameSet = new Set(problemFiles.map(f => f.basename));
+
+    const seen = new Set();
+    const results = [];
+    for (const name of mentionedLinks) {
+      if (!problemNameSet.has(name)) continue;
+      const file = problemFiles.find(f => f.basename === name);
+      if (!file) continue;
+      const cache = this.app.metadataCache.getFileCache(file);
+      const retrievePages = cache?.frontmatter?.['Retrieve Pages'];
+      if (!Array.isArray(retrievePages)) continue;
+      for (const entry of retrievePages) {
+        const match = entry.match(/\[\[([^\]]+)\]\]/);
+        if (!match) continue;
+        const raw = match[1];
+        // Preserve the original link text from frontmatter (already has path|alias)
+        const entryName = raw.includes('|') ? raw.split('|').pop() : raw.split('/').pop();
+        if (seen.has(entryName)) continue;
+        seen.add(entryName);
+        results.push({ name: entryName, link: raw });
+      }
+    }
+
+    return results;
+  }
+
+  async insertSearchResults(editor, mentionedLinks, cueText, blockEnd) {
+    const retrieveMatches = await this.retrieveLinkedPages(mentionedLinks);
+    const excludeNames = retrieveMatches.map(m => m.name);
+    const { aiMatches, aiWarning } = await this.runAiSearch(cueText, excludeNames);
 
     let outputLines = '';
-    for (const name of keywordMatches) outputLines += '\n\t\t- [[' + name + ']]';
-    for (const name of aiMatches) outputLines += '\n\t\t- [[' + name + ']] (ai)';
+    for (const m of retrieveMatches) outputLines += '\n\t\t- [[' + m.link + ']]';
+    for (const m of aiMatches) outputLines += '\n\t\t- [[' + m.link + ']] (ai)';
     if (aiWarning) outputLines += '\n\t\t- ' + aiWarning;
 
     const insertion = '\n\t- Learning Loop Output' + outputLines +
@@ -99,43 +153,50 @@ class LearningLoopPlugin extends Plugin {
     const lineLen = editor.getLine(blockEnd).length;
     editor.replaceRange(insertion, { line: blockEnd, ch: lineLen });
 
-    const totalOutputLines = keywordMatches.length + aiMatches.length + (aiWarning ? 1 : 0);
+    const totalOutputLines = retrieveMatches.length + aiMatches.length + (aiWarning ? 1 : 0);
     const reviewLabelLine = blockEnd + 1 + totalOutputLines + 1;
     const cursorLine = reviewLabelLine + 1;
     editor.setCursor({ line: cursorLine, ch: '\t\t- '.length });
     this.enterInsertMode(editor);
   }
 
-  // Returns { keywordMatches: string[], aiMatches: string[], aiWarning: string|null }
-  // keywordMatches and aiMatches are basenames (no brackets), deduplicated between sets.
-  async runSearch(cueText, allFiles) {
+  // Build a mapping of queries → page names from all Problem pages' Queries frontmatter.
+  buildQueryIndex() {
+    const allFiles = this.app.vault.getFiles();
     const problemFiles = allFiles.filter(f => f.extension === 'md' && f.path.startsWith('Problems/'));
-    const problemNames = problemFiles.map(f => f.basename);
-
-    // Keyword search (all .md files with frontmatter tags, as before)
-    const cueLower = cueText.toLowerCase();
-    const keywordMatches = [];
-    for (const file of allFiles.filter(f => f.extension === 'md')) {
+    const entries = [];
+    for (const file of problemFiles) {
       const cache = this.app.metadataCache.getFileCache(file);
-      if (!cache || !cache.frontmatter) continue;
-      const tags = parseFrontMatterTags(cache.frontmatter);
-      if (!tags) continue;
-      const matched = tags.some(tag => {
-        const keyword = tag.replace(/^#/, '').toLowerCase();
-        return cueLower.includes(keyword);
-      });
-      if (matched) keywordMatches.push(file.basename);
+      const queries = cache?.frontmatter?.['Queries'];
+      if (!Array.isArray(queries)) continue;
+      for (const q of queries) {
+        entries.push({ query: q, page: file.basename });
+      }
     }
+    return entries;
+  }
 
-    // AI search
+  // AI search — returns { aiMatches: {name,link}[], aiWarning: string|null }
+  // Uses stored queries from Problem pages to find semantically similar matches.
+  async runAiSearch(cueText, excludeNames) {
     let aiMatches = [];
     let aiWarning = null;
 
+    const queryIndex = this.buildQueryIndex();
+    if (queryIndex.length === 0) return { aiMatches, aiWarning };
+
+    // Build a lookup from basename → full link for Problem pages
+    const allFiles = this.app.vault.getFiles();
+    const problemFiles = allFiles.filter(f => f.extension === 'md' && f.path.startsWith('Problems/'));
+    const nameToLink = new Map();
+    for (const f of problemFiles) nameToLink.set(f.basename, this.fileToLink(f));
+
     if (!this.settings.anthropicApiKey) {
-      aiWarning = '⚠ no API key set — keyword search only (add key in plugin settings)';
+      aiWarning = '⚠ no API key set — Retrieve Pages search only (add key in plugin settings)';
     } else {
       try {
-        const prompt = `Given this cue: "${cueText}"\n\nHere are the available problem pages:\n${problemNames.map(n => `- ${n}`).join('\n')}\n\nReturn a JSON array of page names from the list above that are relevant to this cue. Only return names from the list. Return ONLY a raw JSON array with no markdown, no code fences, no explanation. Example: ["Stress", "Anxiety"]`;
+        const indexText = queryIndex.map(e => `- "${e.query}" → ${e.page}`).join('\n');
+        const prompt = `Given this cue: "${cueText}"\n\nHere is an index of past queries mapped to their problem pages:\n${indexText}\n\nReturn a JSON array of page names whose queries are semantically similar to the cue. Only return page names from the index. Deduplicate page names. Return ONLY a raw JSON array with no markdown, no code fences, no explanation. Example: ["Stress", "Anxiety"]`;
 
         const response = await requestUrl({
           url: 'https://api.anthropic.com/v1/messages',
@@ -159,16 +220,30 @@ class LearningLoopPlugin extends Plugin {
         const data = response.json;
         const raw = (data.content?.[0]?.text ?? '[]').replace(/^```[a-z]*\n?/i, '').replace(/```$/, '').trim();
         const parsed = JSON.parse(raw);
-        const keywordSet = new Set(keywordMatches);
-        // Validate names exist in Problems/ and aren't already in keyword results
+        const validNames = new Set(queryIndex.map(e => e.page));
+        const excludeSet = new Set(excludeNames);
         aiMatches = parsed
-          .filter(name => problemNames.includes(name) && !keywordSet.has(name));
+          .filter(name => validNames.has(name) && !excludeSet.has(name))
+          .map(name => ({ name, link: nameToLink.get(name) || name }));
       } catch (e) {
-        aiWarning = `⚠ AI search failed — keyword search only (${e.message})`;
+        aiWarning = `⚠ AI search failed — Retrieve Pages search only (${e.message})`;
       }
     }
 
-    return { keywordMatches, aiMatches, aiWarning };
+    return { aiMatches, aiWarning };
+  }
+
+  // Append a query to the Queries frontmatter of each named page.
+  async writeQueriesToPages(query, pageNames) {
+    const allFiles = this.app.vault.getFiles();
+    for (const name of pageNames) {
+      const file = allFiles.find(f => f.extension === 'md' && f.basename === name);
+      if (!file) continue;
+      await this.app.fileManager.processFrontMatter(file, (fm) => {
+        if (!Array.isArray(fm['Queries'])) fm['Queries'] = [];
+        if (!fm['Queries'].includes(query)) fm['Queries'].push(query);
+      });
+    }
   }
 
   smartOpenRightPane() {
@@ -295,8 +370,31 @@ class LearningLoopPlugin extends Plugin {
             if (lineText === '- Review') reviewLineIdx = i;
           }
 
-          // Review exists — exit the trace by inserting a new line after block
+          // Review exists — write queries to pages, then exit the trace
           if (reviewLineIdx !== -1) {
+            // Extract the query from User Thought / Feeling
+            if (thoughtLineIdx !== -1 && llOutputLineIdx !== -1) {
+              const thoughtIndentLen = editor.getLine(thoughtLineIdx).match(/^(\s*)/)[1].length;
+              let query = '';
+              const thoughtEndLine = responseLineIdx !== -1 ? responseLineIdx - 1 : llOutputLineIdx - 1;
+              for (let i = thoughtLineIdx + 1; i <= thoughtEndLine; i++) {
+                const line = editor.getLine(i);
+                if (!line.trim()) continue;
+                if (line.match(/^(\s*)/)[1].length <= thoughtIndentLen) break;
+                query += ' ' + line.replace(/^[\s\t]*-\s*/, '');
+              }
+              query = query.trim();
+
+              // Extract page names from the entire trace
+              if (query) {
+                const allTracePages = this.extractLinks(editor, blockStart, blockEnd);
+                const uniquePages = [...new Set(allTracePages)];
+                if (uniquePages.length > 0) {
+                  await this.writeQueriesToPages(query, uniquePages);
+                }
+              }
+            }
+
             const lineLen = editor.getLine(blockEnd).length;
             editor.replaceRange('\n', { line: blockEnd, ch: lineLen });
             editor.setCursor({ line: blockEnd + 1, ch: 0 });
@@ -318,7 +416,7 @@ class LearningLoopPlugin extends Plugin {
             return;
           }
 
-          // User Response exists — run search using thought text
+          // User Response exists — extract links and text, then search
           const thoughtIndentLen = editor.getLine(thoughtLineIdx).match(/^(\s*)/)[1].length;
           let thoughtText = '';
           for (let i = thoughtLineIdx + 1; i <= blockEnd; i++) {
@@ -330,7 +428,13 @@ class LearningLoopPlugin extends Plugin {
           thoughtText = thoughtText.trim();
           if (!thoughtText) return;
 
-          await this.insertSearchResults(editor, thoughtText, blockEnd);
+          // Extract [[links]] from both User Thought / Feeling and User Response sections
+          const mentionedLinks = [
+            ...this.extractLinks(editor, thoughtLineIdx, responseLineIdx - 1),
+            ...this.extractLinks(editor, responseLineIdx, blockEnd),
+          ];
+
+          await this.insertSearchResults(editor, mentionedLinks, thoughtText, blockEnd);
           return;
         }
 

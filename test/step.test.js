@@ -90,26 +90,82 @@ describe('help state machine', () => {
     expect(cursor(editor)).toEqual({ line: 4, ch: '\t\t- '.length });
   });
 
-  test('trace with User Response → runs search and inserts Learning Loop Output', async () => {
-    const stressPage = { basename: 'Stress', path: 'Problems/Stress.md', frontmatter: { tags: ['#stressed'] } };
+  test('trace with User Response → retrieves pages from mentioned Problem pages and inserts Learning Loop Output', async () => {
+    const stressPage = {
+      basename: 'Stress',
+      path: 'Problems/Stress.md',
+      frontmatter: { 'Retrieve Pages': ['[[Problems/Anxiety|Anxiety]]', '[[Problems/Burnout|Burnout]]'] },
+    };
+    const anxietyPage = { basename: 'Anxiety', path: 'Problems/Anxiety.md', frontmatter: {} };
+    const burnoutPage = { basename: 'Burnout', path: 'Problems/Burnout.md', frontmatter: {} };
     const editor = createEditor([
       '- [[Learning Loop Trace]] %% fold %%',
       '\t- User Thought / Feeling',
-      "\t\t- I'm stressed",
+      "\t\t- I'm feeling [[Stress]]",
       '\t- User Response',
       '\t\t- I need to relax',       // cursor here (line 4)
     ], 4, 5);
 
-    const { help } = await createPlugin([stressPage]);
+    const { help } = await createPlugin([stressPage, anxietyPage, burnoutPage]);
     await help(editor);
 
     const doc = lines(editor);
     expect(doc[5]).toBe('\t- Learning Loop Output');
-    expect(doc[6]).toBe('\t\t- [[Stress]]');
-    // line 7: AI warning (no API key in test)
+    expect(doc[6]).toBe('\t\t- [[Problems/Anxiety|Anxiety]]');
+    expect(doc[7]).toBe('\t\t- [[Problems/Burnout|Burnout]]');
     expect(doc[8]).toBe('\t- Review');
     expect(doc[9]).toBe('\t\t- ');
     // Cursor on blank bullet under "Review"
     expect(cursor(editor)).toEqual({ line: 9, ch: '\t\t- '.length });
+  });
+
+  test('exiting trace writes query to all pages mentioned anywhere in the trace', async () => {
+    const stressPage = { basename: 'Stress', path: 'Problems/Stress.md', frontmatter: {} };
+    const anxietyPage = { basename: 'Anxiety', path: 'Problems/Anxiety.md', frontmatter: {} };
+    const burnoutPage = { basename: 'Burnout', path: 'Problems/Burnout.md', frontmatter: {} };
+    const editor = createEditor([
+      '- [[Learning Loop Trace]] %% fold %%',
+      '\t- User Thought / Feeling',
+      "\t\t- I'm feeling [[Stress]]",
+      '\t- User Response',
+      '\t\t- I need to relax',
+      '\t- Learning Loop Output',
+      '\t\t- [[Anxiety]]',
+      '\t\t- [[Burnout]]',
+      '\t- Review',
+      '\t\t- reviewed',                // cursor here (line 9)
+    ], 9, 0);
+
+    const { help } = await createPlugin([stressPage, anxietyPage, burnoutPage]);
+    await help(editor);
+
+    // Query should have been written to all pages in the trace (thought + output)
+    expect(stressPage.frontmatter['Queries']).toEqual(["I'm feeling [[Stress]]"]);
+    expect(anxietyPage.frontmatter['Queries']).toEqual(["I'm feeling [[Stress]]"]);
+    expect(burnoutPage.frontmatter['Queries']).toEqual(["I'm feeling [[Stress]]"]);
+  });
+
+  test('exiting trace does not duplicate existing queries', async () => {
+    const anxietyPage = {
+      basename: 'Anxiety',
+      path: 'Problems/Anxiety.md',
+      frontmatter: { 'Queries': ["I'm feeling stressed"] },
+    };
+    const editor = createEditor([
+      '- [[Learning Loop Trace]] %% fold %%',
+      '\t- User Thought / Feeling',
+      "\t\t- I'm feeling stressed",
+      '\t- User Response',
+      '\t\t- I need to relax',
+      '\t- Learning Loop Output',
+      '\t\t- [[Anxiety]]',
+      '\t- Review',
+      '\t\t- reviewed',
+    ], 8, 0);
+
+    const { help } = await createPlugin([anxietyPage]);
+    await help(editor);
+
+    expect(anxietyPage.frontmatter['Queries']).toEqual(["I'm feeling stressed"]);
   });
 });
